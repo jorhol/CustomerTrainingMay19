@@ -74,6 +74,7 @@
 #include "ble_softdevice_support.h"
 
 #include "nrf_serial.h"
+#include "nrf_drv_timer.h"
 
 #ifdef BOARD_PCA20020
 #include "twi_manager.h"
@@ -144,6 +145,10 @@ NRF_SERIAL_CONFIG_DEF(serial_config, NRF_SERIAL_MODE_IRQ,
 
 
 NRF_SERIAL_UART_DEF(serial_uart, 0);
+
+const nrf_drv_timer_t m_timer_id = NRF_DRV_TIMER_INSTANCE(3);
+#define TIMER_COMPARE_TIME_MS 1000
+static uint8_t send_timer_uart_string = false;
 
 #define APP_LEVEL_STEP_SIZE     (16384L)
 
@@ -326,6 +331,44 @@ static void mesh_init(void)
     ERROR_CHECK(mesh_stack_init(&init_params, &m_device_provisioned));
 }
 
+/**
+ * @brief Handler for timer events.
+ */
+void timer_event_handler(nrf_timer_event_t event_type, void* p_context)
+{
+    switch (event_type)
+    {
+        case NRF_TIMER_EVENT_COMPARE0:
+            {
+                send_timer_uart_string = true;
+            }
+            break;
+
+        default:
+            //Do nothing.
+            break;
+    }
+}
+
+
+void timers_init(uint32_t time_ms)
+{
+    uint32_t time_ticks;
+    uint32_t err_code = NRF_SUCCESS;
+
+    //Configure TIMER_LED for generating simple light effect - leds on board will invert his state one after the other.
+    nrf_drv_timer_config_t timer_cfg = NRF_DRV_TIMER_DEFAULT_CONFIG;
+    err_code = nrf_drv_timer_init(&m_timer_id, &timer_cfg, timer_event_handler);
+    APP_ERROR_CHECK(err_code);
+
+    time_ticks = nrf_drv_timer_ms_to_ticks(&m_timer_id, 1000);
+
+    nrf_drv_timer_extended_compare(
+         &m_timer_id, NRF_TIMER_CC_CHANNEL0, time_ticks, NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK, true);
+
+    nrf_drv_timer_enable(&m_timer_id);
+}
+
 #ifdef BOARD_PCA20020
 void thingy_led_init(const nrf_drv_twi_t *p_twi_instance)
 {
@@ -383,8 +426,11 @@ static void initialize(void)
                            NRF_SERIAL_MAX_TIMEOUT);
     APP_ERROR_CHECK(ret);
 
+    timers_init(TIMER_COMPARE_TIME_MS);
+#if 0
 #ifdef BOARD_PCA20020
     thingy_led_init(&m_twi_sensors);
+#endif
 #endif
 
     ble_stack_init();
@@ -435,6 +481,18 @@ int main(void)
 
     for (;;)
     {
+        if(send_timer_uart_string == true)
+        {
+            static char tx_message[] = "TIMER event!\n\r";
+
+            ret_code_t ret = nrf_serial_write(&serial_uart,
+                                   tx_message,
+                                   strlen(tx_message),
+                                   NULL,
+                                   NRF_SERIAL_MAX_TIMEOUT);
+            APP_ERROR_CHECK(ret);
+            send_timer_uart_string = false;
+        }
         (void)sd_app_evt_wait();
     }
 }
