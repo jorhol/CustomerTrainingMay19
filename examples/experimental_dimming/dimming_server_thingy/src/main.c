@@ -74,6 +74,7 @@
 #include "ble_softdevice_support.h"
 
 #include "nrf_serial.h"
+#include "nrfx_saadc.h"
 #include "nrf_drv_timer.h"
 
 #ifdef BOARD_PCA20020
@@ -146,6 +147,9 @@ NRF_SERIAL_CONFIG_DEF(serial_config, NRF_SERIAL_MODE_IRQ,
 
 NRF_SERIAL_UART_DEF(serial_uart, 0);
 
+#define SAMPLES_IN_BUFFER 5
+static nrf_saadc_value_t     m_buffer_pool[2][SAMPLES_IN_BUFFER];
+
 const nrf_drv_timer_t m_timer_id = NRF_DRV_TIMER_INSTANCE(3);
 #define TIMER_COMPARE_TIME_MS 1000
 static uint8_t send_timer_uart_string = false;
@@ -173,7 +177,7 @@ APP_LEVEL_SERVER_DEF(m_level_server_0,
  */
 APP_PWM_INSTANCE(PWM0, 1);
 #ifdef BOARD_PCA20020
-app_pwm_config_t m_pwm0_config = APP_PWM_DEFAULT_CONFIG_1CH(200, ANA_DIG2);
+app_pwm_config_t m_pwm0_config = APP_PWM_DEFAULT_CONFIG_1CH(200, ANA_DIG1);
 #else
 app_pwm_config_t m_pwm0_config = APP_PWM_DEFAULT_CONFIG_1CH(200, BSP_LED_0);
 #endif
@@ -331,6 +335,45 @@ static void mesh_init(void)
     ERROR_CHECK(mesh_stack_init(&init_params, &m_device_provisioned));
 }
 
+
+void saadc_callback(nrfx_saadc_evt_t const * p_event)
+{
+    if (p_event->type == NRFX_SAADC_EVT_DONE)
+    {
+        ret_code_t err_code;
+
+        send_timer_uart_string = true;
+
+        err_code = nrfx_saadc_buffer_convert(p_event->data.done.p_buffer, SAMPLES_IN_BUFFER);
+        APP_ERROR_CHECK(err_code);
+
+    }
+}
+
+
+void saadc_init(void)
+{
+    ret_code_t err_code;
+
+    nrfx_saadc_config_t saadc_config = NRFX_SAADC_DEFAULT_CONFIG;
+
+    nrf_saadc_channel_config_t channel_config =
+        NRFX_SAADC_DEFAULT_CHANNEL_CONFIG_SE(NRF_SAADC_INPUT_AIN2);
+
+    err_code = nrfx_saadc_init(&saadc_config, saadc_callback);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = nrfx_saadc_channel_init(0, &channel_config);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = nrfx_saadc_buffer_convert(m_buffer_pool[0], SAMPLES_IN_BUFFER);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = nrfx_saadc_buffer_convert(m_buffer_pool[1], SAMPLES_IN_BUFFER);
+    APP_ERROR_CHECK(err_code);
+
+}
+
 /**
  * @brief Handler for timer events.
  */
@@ -340,7 +383,8 @@ void timer_event_handler(nrf_timer_event_t event_type, void* p_context)
     {
         case NRF_TIMER_EVENT_COMPARE0:
             {
-                send_timer_uart_string = true;
+                nrfx_err_t err_code = nrfx_saadc_sample();
+                APP_ERROR_CHECK(err_code);
             }
             break;
 
@@ -361,7 +405,7 @@ void timers_init(uint32_t time_ms)
     err_code = nrf_drv_timer_init(&m_timer_id, &timer_cfg, timer_event_handler);
     APP_ERROR_CHECK(err_code);
 
-    time_ticks = nrf_drv_timer_ms_to_ticks(&m_timer_id, 1000);
+    time_ticks = nrf_drv_timer_ms_to_ticks(&m_timer_id, time_ms);
 
     nrf_drv_timer_extended_compare(
          &m_timer_id, NRF_TIMER_CC_CHANNEL0, time_ticks, NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK, true);
@@ -427,6 +471,7 @@ static void initialize(void)
     APP_ERROR_CHECK(ret);
 
     timers_init(TIMER_COMPARE_TIME_MS);
+    saadc_init();
 #if 0
 #ifdef BOARD_PCA20020
     thingy_led_init(&m_twi_sensors);
@@ -483,7 +528,7 @@ int main(void)
     {
         if(send_timer_uart_string == true)
         {
-            static char tx_message[] = "TIMER event!\n\r";
+            static char tx_message[] = "SAADC buffer full!\n\r";
 
             ret_code_t ret = nrf_serial_write(&serial_uart,
                                    tx_message,
