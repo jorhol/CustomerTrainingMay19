@@ -75,6 +75,43 @@
 
 #include "nrf_serial.h"
 
+#ifdef BOARD_PCA20020
+#include "twi_manager.h"
+#include "drv_ext_light.h"
+#include "nrf_drv_twi.h"
+#define TWI_SENSOR_INSTANCE 0
+static const nrf_drv_twi_t     m_twi_sensors = NRF_DRV_TWI_INSTANCE(TWI_SENSOR_INSTANCE);
+
+#define SX1509_ADDR     0x3E
+
+#define DRV_EXT_RGB_LED_SENSE        0
+#define DRV_EXT_RGB_LED_LIGHTWELL    1
+#define DRV_EXT_LIGHT_NUM            2
+
+DRV_EXT_LIGHT_DEF(my_led_0);
+DRV_EXT_LIGHT_DEF(my_led_1);
+
+#define DRV_EXT_LIGHT_CFG                \
+{                                        \
+    {                                    \
+        .type = DRV_EXT_LIGHT_TYPE_RGB,  \
+        .pin.rgb = {                     \
+            .r = SX_SENSE_LED_R,         \
+            .g = SX_SENSE_LED_G,         \
+            .b = SX_SENSE_LED_B },       \
+        .p_data = &my_led_0              \
+    },                                   \
+    {                                    \
+        .type = DRV_EXT_LIGHT_TYPE_RGB,  \
+        .pin.rgb = {                     \
+            .r = SX_LIGHTWELL_R,         \
+            .g = SX_LIGHTWELL_G,         \
+            .b = SX_LIGHTWELL_B },       \
+        .p_data = &my_led_1              \
+    },                                   \
+};
+#endif
+
 static void sleep_handler(void)
 {
     __WFE();
@@ -85,9 +122,11 @@ static void sleep_handler(void)
 NRF_SERIAL_DRV_UART_CONFIG_DEF(m_uart0_drv_config,
                       RX_PIN_NUMBER, TX_PIN_NUMBER,
                       RTS_PIN_NUMBER, CTS_PIN_NUMBER,
-                      NRF_UART_HWFC_ENABLED, NRF_UART_PARITY_EXCLUDED,
+                      HWFC, NRF_UART_PARITY_EXCLUDED,
                       NRF_UART_BAUDRATE_115200,
                       UART_DEFAULT_CONFIG_IRQ_PRIORITY);
+
+
 
 #define SERIAL_FIFO_TX_SIZE 32
 #define SERIAL_FIFO_RX_SIZE 32
@@ -128,7 +167,11 @@ APP_LEVEL_SERVER_DEF(m_level_server_0,
  * between 0 and  m_pwm0_max.
  */
 APP_PWM_INSTANCE(PWM0, 1);
+#ifdef BOARD_PCA20020
+app_pwm_config_t m_pwm0_config = APP_PWM_DEFAULT_CONFIG_1CH(200, ANA_DIG2);
+#else
 app_pwm_config_t m_pwm0_config = APP_PWM_DEFAULT_CONFIG_1CH(200, BSP_LED_0);
+#endif
 static uint16_t m_pwm0_max;
 
 /* Application variable for holding instantaneous level value */
@@ -283,6 +326,44 @@ static void mesh_init(void)
     ERROR_CHECK(mesh_stack_init(&init_params, &m_device_provisioned));
 }
 
+#ifdef BOARD_PCA20020
+void thingy_led_init(const nrf_drv_twi_t *p_twi_instance)
+{
+
+    /**@brief Initialize the TWI manager. */
+    ret_code_t err_code = twi_manager_init(APP_IRQ_PRIORITY_THREAD);
+    APP_ERROR_CHECK(err_code);
+
+    static drv_sx1509_cfg_t         sx1509_cfg;
+    drv_ext_light_init_t            led_init;
+    static const drv_ext_light_conf_t led_conf[DRV_EXT_LIGHT_NUM] = DRV_EXT_LIGHT_CFG;
+
+    static const nrf_drv_twi_config_t twi_config =
+    {
+        .scl                = TWI_SCL,
+        .sda                = TWI_SDA,
+        .frequency          = NRF_TWI_FREQ_100K,
+        .interrupt_priority = APP_IRQ_PRIORITY_LOW
+    };
+
+    sx1509_cfg.twi_addr       = SX1509_ADDR;
+    sx1509_cfg.p_twi_instance = p_twi_instance;
+    sx1509_cfg.p_twi_cfg      = &twi_config;
+
+    led_init.p_light_conf        = led_conf;
+    led_init.num_lights          = DRV_EXT_LIGHT_NUM;
+    led_init.clkx_div            = DRV_EXT_LIGHT_CLKX_DIV_8;
+    led_init.p_twi_conf          = &sx1509_cfg;
+    led_init.resync_pin          = SX_RESET;
+
+    err_code = drv_ext_light_init(&led_init, false);
+    APP_ERROR_CHECK(err_code);
+
+    (void)drv_ext_light_on(DRV_EXT_RGB_LED_SENSE);
+    (void)drv_ext_light_on(DRV_EXT_RGB_LED_LIGHTWELL);
+}
+#endif
+
 static void initialize(void)
 {
     __LOG_INIT(LOG_SRC_APP | LOG_SRC_ACCESS | LOG_SRC_BEARER, LOG_LEVEL_INFO, LOG_CALLBACK_DEFAULT);
@@ -301,6 +382,10 @@ static void initialize(void)
                            NULL,
                            NRF_SERIAL_MAX_TIMEOUT);
     APP_ERROR_CHECK(ret);
+
+#ifdef BOARD_PCA20020
+    thingy_led_init(&m_twi_sensors);
+#endif
 
     ble_stack_init();
 
