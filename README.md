@@ -24,7 +24,7 @@ This repository contains code and instructions for Bluetooth Mesh peripheral tra
 
 ## Adding nrf_serial library to light_switch_dimming_server example
 
-This code used in this task is based on the [Serial port library example](https://infocenter.nordicsemi.com/topic/com.nordic.infocenter.sdk5.v15.2.0/serial_example.html?cp=5_4_0_4_5_35) from nRF5 SDK v15.2.0. We start by adding the includes and defines to top of main.c:
+This code used in this task is based on the [Serial port library example](https://infocenter.nordicsemi.com/topic/com.nordic.infocenter.sdk5.v15.2.0/serial_example.html?cp=5_4_0_4_5_35) from nRF5 SDK v15.2.0. We start by adding the includes and defines to top of main.c: 
 
 ```c
 #include "nrf_serial.h"
@@ -39,7 +39,7 @@ static void sleep_handler(void)
 NRF_SERIAL_DRV_UART_CONFIG_DEF(m_uart0_drv_config,
                       RX_PIN_NUMBER, TX_PIN_NUMBER,
                       RTS_PIN_NUMBER, CTS_PIN_NUMBER,
-                      NRF_UART_HWFC_ENABLED, NRF_UART_PARITY_EXCLUDED,
+                      HWFC, NRF_UART_PARITY_EXCLUDED,
                       NRF_UART_BAUDRATE_115200,
                       UART_DEFAULT_CONFIG_IRQ_PRIORITY);
 
@@ -61,7 +61,7 @@ NRF_SERIAL_CONFIG_DEF(serial_config, NRF_SERIAL_MODE_IRQ,
 NRF_SERIAL_UART_DEF(serial_uart, 0);
 ```
 
-Then initialize the library and send a message inside fundtion initialize() (before ble_stack_init()):
+Then initialize the library and send a message inside function initialize() (before ble_stack_init()):
 
 ```c
 ret_code_t ret = nrf_serial_init(&serial_uart, &m_uart0_drv_config, &serial_config);
@@ -225,5 +225,95 @@ We also need to change the following configs that are already present in sdk_con
 #ifndef UART0_ENABLED
 #define UART0_ENABLED 1
 #endif
-
 ```
+
+
+
+## Adding timer to light_switch_dimming_server example
+
+The example already includes timer driver, since this is used by PWM library (used to control LEDs). This means that we do not need to add paths to the headers, or include source files. The code in this section is based on the [peripheral timer example](https://infocenter.nordicsemi.com/topic/com.nordic.infocenter.sdk5.v15.2.0/nrf_dev_timer_example.html?cp=5_4_0_4_5_46) in nRF5 SDK v15.2.0.
+
+In sdk_config.h, the legacy timer driver config is commented out. This config should be commented back in and enabled. Change these lines:
+```c
+//#ifndef TIMER_ENABLED
+//#define TIMER_ENABLED 0
+//#endif
+```
+into:
+```c
+#ifndef TIMER_ENABLED
+#define TIMER_ENABLED 1
+#endif
+```
+
+Next, we need to enable the used timer instances and set the correct config. TIMER0 is used by the softdevice, TIMER1 is used by PWM library in the application, TIMER2 is used by Bluetooth Mesh stack, leaving TIMER3 and TIMER4 available for application. We will use TIMER3, and configure the timer with 32-bit width:
+
+```c
+#ifndef TIMER_DEFAULT_CONFIG_BIT_WIDTH
+#define TIMER_DEFAULT_CONFIG_BIT_WIDTH 3
+#endif
+ 
+#ifndef TIMER1_ENABLED
+#define TIMER1_ENABLED 1
+#endif
+ 
+#ifndef TIMER3_ENABLED
+#define TIMER3_ENABLED 1
+#endif
+```
+Include the header file in main.c and create the timer instance. We can also create a define that will be used later to setup the timeout of the timer. 
+```c
+#include "nrf_drv_timer.h"
+ 
+const nrf_drv_timer_t m_timer_id = NRF_DRV_TIMER_INSTANCE(3);
+#define TIMER_COMPARE_TIME_MS 1000
+```
+In order to handle timer timeouts, we need to declare a handler that is called by timer driver when a compare event is generated. This handler will send a string on UART everytime the timer times out:
+```c
+void timer_event_handler(nrf_timer_event_t event_type, void* p_context)
+{
+    switch (event_type)
+    {
+        case NRF_TIMER_EVENT_COMPARE0:
+            {
+                static char tx_message[] = "Hello nrf_serial!\n\r";
+
+                ret_code_t ret = nrf_serial_write(&serial_uart,
+                                       tx_message,
+                                       strlen(tx_message),
+                                       NULL,
+                                       NRF_SERIAL_MAX_TIMEOUT);
+                APP_ERROR_CHECK(ret);
+            }
+            break;
+
+        default:
+            //Do nothing.
+            break;
+    }
+}
+```
+We define a function that initializes the timer. This use the define we defined previously (TIMER_COMPARE_TIME_MS) to determine the number of ticks in the timer for the desired timeout.
+```c
+void timers_init(void)
+{
+    uint32_t time_ticks;
+    uint32_t err_code = NRF_SUCCESS;
+    
+    nrf_drv_timer_config_t timer_cfg = NRF_DRV_TIMER_DEFAULT_CONFIG;
+    err_code = nrf_drv_timer_init(&m_timer_id, &timer_cfg, timer_event_handler);
+    APP_ERROR_CHECK(err_code);
+
+    time_ticks = nrf_drv_timer_ms_to_ticks(&m_timer_id, TIMER_COMPARE_TIME_MS);
+
+    nrf_drv_timer_extended_compare(
+         &m_timer_id, NRF_TIMER_CC_CHANNEL0, time_ticks, NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK, true);
+
+    nrf_drv_timer_enable(&m_timer_id);
+}
+```
+Finally we call the init function in initialize():
+```c
+timers_init();
+```
+If you compile the application, you should now see the string "Hello nrf_serial!" being printed in the terminal every 1000 ms.
