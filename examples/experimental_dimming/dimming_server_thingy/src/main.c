@@ -75,6 +75,7 @@
 
 #include "nrf_serial.h"
 #include "nrfx_saadc.h"
+#include "nrfx_ppi.h"
 #include "nrf_drv_timer.h"
 
 #ifdef BOARD_PCA20020
@@ -147,8 +148,10 @@ NRF_SERIAL_CONFIG_DEF(serial_config, NRF_SERIAL_MODE_IRQ,
 
 NRF_SERIAL_UART_DEF(serial_uart, 0);
 
-#define SAMPLES_IN_BUFFER 5
+#define SAMPLES_IN_BUFFER 8
 static nrf_saadc_value_t     m_buffer_pool[2][SAMPLES_IN_BUFFER];
+static nrf_saadc_value_t     saadc_buffer_serial[SAMPLES_IN_BUFFER];
+static nrf_ppi_channel_t     m_ppi_channel;
 
 const nrf_drv_timer_t m_timer_id = NRF_DRV_TIMER_INSTANCE(3);
 #define TIMER_COMPARE_TIME_MS 1000
@@ -344,6 +347,8 @@ void saadc_callback(nrfx_saadc_evt_t const * p_event)
 
         send_timer_uart_string = true;
 
+        memcpy(saadc_buffer_serial, p_event->data.done.p_buffer, SAMPLES_IN_BUFFER*sizeof(int16_t));
+
         err_code = nrfx_saadc_buffer_convert(p_event->data.done.p_buffer, SAMPLES_IN_BUFFER);
         APP_ERROR_CHECK(err_code);
 
@@ -366,10 +371,35 @@ void saadc_init(void)
     err_code = nrfx_saadc_channel_init(0, &channel_config);
     APP_ERROR_CHECK(err_code);
 
+#ifndef BOARD_PCA20020
+    nrf_saadc_channel_config_t channel_config2 =
+        NRFX_SAADC_DEFAULT_CHANNEL_CONFIG_SE(NRF_SAADC_INPUT_AIN1);
+
+    err_code = nrfx_saadc_channel_init(1, &channel_config2);
+    APP_ERROR_CHECK(err_code);
+#endif
+
     err_code = nrfx_saadc_buffer_convert(m_buffer_pool[0], SAMPLES_IN_BUFFER);
     APP_ERROR_CHECK(err_code);
 
     err_code = nrfx_saadc_buffer_convert(m_buffer_pool[1], SAMPLES_IN_BUFFER);
+    APP_ERROR_CHECK(err_code);
+
+    uint32_t timer_compare_event_addr = nrf_drv_timer_compare_event_address_get(&m_timer_id,
+                                                                                NRF_TIMER_CC_CHANNEL0);
+    uint32_t saadc_sample_task_addr   = nrfx_saadc_sample_task_get();
+
+    /* setup ppi channel so that timer compare event is triggering sample task in SAADC */
+    err_code = nrfx_ppi_channel_alloc(&m_ppi_channel);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = nrfx_ppi_channel_assign(m_ppi_channel,
+                                          timer_compare_event_addr,
+                                          saadc_sample_task_addr);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = nrfx_ppi_channel_enable(m_ppi_channel);
+
     APP_ERROR_CHECK(err_code);
 
 }
@@ -383,8 +413,7 @@ void timer_event_handler(nrf_timer_event_t event_type, void* p_context)
     {
         case NRF_TIMER_EVENT_COMPARE0:
             {
-                nrfx_err_t err_code = nrfx_saadc_sample();
-                APP_ERROR_CHECK(err_code);
+
             }
             break;
 
@@ -408,7 +437,7 @@ void timers_init(uint32_t time_ms)
     time_ticks = nrf_drv_timer_ms_to_ticks(&m_timer_id, time_ms);
 
     nrf_drv_timer_extended_compare(
-         &m_timer_id, NRF_TIMER_CC_CHANNEL0, time_ticks, NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK, true);
+         &m_timer_id, NRF_TIMER_CC_CHANNEL0, time_ticks, NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK, false);
 
     nrf_drv_timer_enable(&m_timer_id);
 }
@@ -528,7 +557,22 @@ int main(void)
     {
         if(send_timer_uart_string == true)
         {
-            static char tx_message[] = "SAADC buffer full!\n\r";
+            int32_t ch0_avg = 0;
+            int32_t ch1_avg = 0;
+            uint8_t loop = 0;
+
+            for(int i = 0; i < SAMPLES_IN_BUFFER; i+=2)
+            {
+                ch0_avg += saadc_buffer_serial[i];
+                ch1_avg += saadc_buffer_serial[i+1];
+                loop++;
+            }
+
+            ch0_avg /= loop;
+            ch1_avg /= loop;
+
+            static char tx_message[40];
+            sprintf(tx_message, "SAADC buffer full! Ch0 avg: %d Ch1 avg: %d\n\r", ch0_avg,  ch1_avg);
 
             ret_code_t ret = nrf_serial_write(&serial_uart,
                                    tx_message,
