@@ -316,4 +316,165 @@ Finally we call the init function in initialize():
 ```c
 timers_init();
 ```
-If you compile the application, you should now see the string "Hello nrf_serial!" being printed in the terminal every 1000 ms.
+If you compile and the application, you should now see the string "Hello nrf_serial!" being printed in the terminal every 1000 ms.
+
+## Adding SAADC driver to light_switch_dimming_server example
+
+From nRF5 SDK v15.0.0, all drivers have been moved to external nrfx driver module. This task will setup and configure sampling of analog input using nrfx version of SAADC driver. SDK 15.x.0 includes a legacy layer that allows you to use the legacy driver APIs, but this might be removed in future SDK versions. It it therefore recommended to use nrfx drivers directly for new designs, whenever possible. The code in this task is based on the SAADC peripheral example in nRF5 SDK v15.2.0, but we have replaced the legaxy API with nrfx driver API.
+
+Paths to nrfx header files are already included in most projects, including this one. We still need to add the source file to the driver implementation:
+```c
+../../../../nRF5_SDK_15.2.0_9412b96/modules/nrfx/drivers/src/nrfx_saadc.c
+```
+In order to configure the NRFX driver, the legacy driver configs need to be completely removed from sdk_config.h (if present), otherwise the NRFX configs might be overwritten by the legacy layer. We remove the following section from the file:
+```c
+// <e> SAADC_ENABLED - nrf_drv_saadc - SAADC peripheral driver - legacy layer
+//==========================================================
+#ifndef SAADC_ENABLED
+#define SAADC_ENABLED 0
+#endif
+// <o> SAADC_CONFIG_RESOLUTION  - Resolution
+
+// <0=> 8 bit
+// <1=> 10 bit
+// <2=> 12 bit
+// <3=> 14 bit
+
+#ifndef SAADC_CONFIG_RESOLUTION
+#define SAADC_CONFIG_RESOLUTION 1
+#endif
+
+// <o> SAADC_CONFIG_OVERSAMPLE  - Sample period
+
+// <0=> Disabled
+// <1=> 2x
+// <2=> 4x
+// <3=> 8x
+// <4=> 16x
+// <5=> 32x
+// <6=> 64x
+// <7=> 128x
+// <8=> 256x
+
+#ifndef SAADC_CONFIG_OVERSAMPLE
+#define SAADC_CONFIG_OVERSAMPLE 0
+#endif
+
+// <q> SAADC_CONFIG_LP_MODE  - Enabling low power mode
+
+
+#ifndef SAADC_CONFIG_LP_MODE
+#define SAADC_CONFIG_LP_MODE 0
+#endif
+
+// <o> SAADC_CONFIG_IRQ_PRIORITY  - Interrupt priority
+
+
+// <i> Priorities 0,2 (nRF51) and 0,1,4,5 (nRF52) are reserved for SoftDevice
+// <0=> 0 (highest)
+// <1=> 1
+// <2=> 2
+// <3=> 3
+// <4=> 4
+// <5=> 5
+// <6=> 6
+// <7=> 7
+
+#ifndef SAADC_CONFIG_IRQ_PRIORITY
+#define SAADC_CONFIG_IRQ_PRIORITY 6
+#endif
+
+// </e>
+```
+And we enable the NRFX driver:
+```c
+#ifndef NRFX_SAADC_ENABLED
+#define NRFX_SAADC_ENABLED 1
+#endif
+```
+
+Include the header file for the nrfx SAADC driver in top of main.c:
+```c
+#include "nrfx_saadc.h"
+```
+
+We defined the desired buffer size and declare the buffer array. The buffer size should be a multiple of the number of enabled channels. In this code, a multi-dimention array is defined to allow double buffering:
+```c
+#define SAMPLES_IN_BUFFER 8
+static nrf_saadc_value_t     m_buffer_pool[2][SAMPLES_IN_BUFFER];
+```
+
+The SAADC peripheral driver will not generate any events until the buffer have been filled with samples. When the buffer is full, the driver will call configured callback to process buffer and setup buffer for new conversions. In this example we only discard the samples in buffer and reconfigure the buffer, but this is the place to do it if you want to do calculations on the samples, or process it in any other way.
+
+```c
+void saadc_callback(nrfx_saadc_evt_t const * p_event)
+{
+    if (p_event->type == NRFX_SAADC_EVT_DONE)
+    {
+        ret_code_t err_code;
+
+        err_code = nrfx_saadc_buffer_convert(p_event->data.done.p_buffer, SAMPLES_IN_BUFFER);
+        APP_ERROR_CHECK(err_code);
+
+    }
+}
+```
+We define a init function that initializes the SAADC driver and channel 0 connected to analog input 2, configured in single-ended mode.
+```c
+void saadc_init(void)
+{
+    ret_code_t err_code;
+
+    nrfx_saadc_config_t saadc_config = NRFX_SAADC_DEFAULT_CONFIG;
+
+    nrf_saadc_channel_config_t channel_config =
+        NRFX_SAADC_DEFAULT_CHANNEL_CONFIG_SE(NRF_SAADC_INPUT_AIN2);
+
+    err_code = nrfx_saadc_init(&saadc_config, saadc_callback);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = nrfx_saadc_channel_init(0, &channel_config);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = nrfx_saadc_buffer_convert(m_buffer_pool[0], SAMPLES_IN_BUFFER);
+    APP_ERROR_CHECK(err_code);
+
+}
+```
+The init function should be called in initialize():
+
+```c
+saadc_init();
+```
+Finally, the sample task needs to be triggered to fill the buffer with samples. This is done by calling the function nrfx_saadc_sample(). Everytime the sample task is triggered, one sample is taken from each enabled channel and stored in the buffer. Sampling can either be done in the loop in main(), or in timer_event_handler() that we created previously:
+```c
+void timer_event_handler(nrf_timer_event_t event_type, void* p_context)
+{
+    switch (event_type)
+    {
+        case NRF_TIMER_EVENT_COMPARE0:
+            {
+                send_timer_uart_string = true;
+                nrfx_err_t err_code = nrfx_saadc_sample();
+                APP_ERROR_CHECK(err_code);
+            }
+            break;
+
+        default:
+            //Do nothing.
+            break;
+    }
+}
+```
+## Challenge: Modify example to trigger SAADC SAMPLE task directly from TIMER COMPARE0 event using PPI
+
+**Hints:**
+- Look at the API documentation for [nrfx_ppi_channel_alloc()](https://infocenter.nordicsemi.com/topic/com.nordic.infocenter.sdk5.v15.2.0/group__nrfx__ppi.html#ga95d5773fc3f4e93c64aec96e58019049), [nrfx_ppi_channel_assign()](https://infocenter.nordicsemi.com/topic/com.nordic.infocenter.sdk5.v15.2.0/group__nrfx__ppi.html#gae3d0c2c6e33fec27c262cd5ec87190db), and [nrfx_ppi_channel_enable()](https://infocenter.nordicsemi.com/topic/com.nordic.infocenter.sdk5.v15.2.0/group__nrfx__ppi.html#ga928edfcbceafb1d635d264df12f0e07c).
+- [Timer driver](https://infocenter.nordicsemi.com/topic/com.nordic.infocenter.sdk5.v15.2.0/group__nrfx__timer.html#ga8523528b9e56fe96f227567b6d74dec8) and [SAADC driver](https://infocenter.nordicsemi.com/topic/com.nordic.infocenter.sdk5.v15.2.0/group__nrfx__saadc.html#gaa9acf337b37235120cf977738e192b6b) provide functions for getting addresses of task and event endpoints.
+
+## Challenger: Add second SAADC channel and double buffering
+
+**Hints:**
+- Use the second buffer array that we created when setting up the SAADC the first time (m_buffer_pool[1])
+- Look at the API documentation of function [nrfx_saadc_buffer_convert()](https://infocenter.nordicsemi.com/topic/com.nordic.infocenter.sdk5.v15.2.0/group__nrfx__saadc.html#ga94a7376973f1726b22a5debc090763eb)
+- Use different [analog input](https://infocenter.nordicsemi.com/topic/ps_nrf52840/pin.html?cp=3_0_0_6_0) and SAADC channel number than used when first configuring the SAADC.
