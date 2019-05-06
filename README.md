@@ -1,4 +1,4 @@
-# Customer training 7. -9. May 2019
+# Customer training 7. - 9. May 2019
 
 This repository contains code and instructions for Bluetooth Mesh peripheral training.
 
@@ -21,8 +21,9 @@ This repository contains code and instructions for Bluetooth Mesh peripheral tra
 - nRF5 SDK for Mesh v3.1.0 [download page](https://www.nordicsemi.com/Software-and-Tools/Software/nRF5-SDK-for-Mesh)
 - nRF5 SDK v15.2.0 [download page](http://developer.nordicsemi.com/nRF5_SDK/nRF5_SDK_v15.x.x/)
 - Latest version of Segger Embedded Studio [download page](https://www.segger.com/downloads/embedded-studio/)
+- All tasks are using light_switch_dimming_server example as the base.
 
-## Adding nrf_serial library to light_switch_dimming_server example
+## Add nrf_serial library to send strings on UART
 
 This code used in this task is based on the [Serial port library example](https://infocenter.nordicsemi.com/topic/com.nordic.infocenter.sdk5.v15.2.0/serial_example.html?cp=5_4_0_4_5_35) from nRF5 SDK v15.2.0. We start by adding the includes and defines to top of main.c: 
 
@@ -227,9 +228,117 @@ We also need to change the following configs that are already present in sdk_con
 #endif
 ```
 
+## Add I2C/TWI support
+This task will show you how to integrate the TWI driver into the example, to control the LED of a Thingy:52 device through a SX1509 IO Extender. To compile the project for Thingy:52, it is sufficient to change the preprocessor define from BOARD_PCA10040 to BOARD_PCA20020. To easily allowing switching between Thingy and nRF52 DK within the same project, you can wrap the Thingy specific functionality inside ifdefs:
 
+```c
+#ifdef BOARD_PCA20020
+// Place code here
+#endif
+```
+BSP_LED_0 is also not defined in the pca20020.h board header file, and cannot be used for the PWM library in the example. You can assign it to another free GPIO when compiling for Thingy:52 target:
+```c
+#ifdef BOARD_PCA20020
+app_pwm_config_t m_pwm0_config = APP_PWM_DEFAULT_CONFIG_1CH(200, ANA_DIG2);
+#else
+app_pwm_config_t m_pwm0_config = APP_PWM_DEFAULT_CONFIG_1CH(200, BSP_LED_0);
+#endif
+```
+Start by adding the required source files to the project:
+```c
+../../../../nRF5_SDK_15.2.0_9412b96/modules/nrfx/drivers/src/nrfx_twi.c
+../../../../nRF5_SDK_15.2.0_9412b96/modules/nrfx/drivers/src/nrfx_twim.c
+../../../../nRF5_SDK_15.2.0_9412b96/integration/nrfx/legacy/nrf_drv_twi.c
+```
+Next, enable the legacy TWI driver with TWIM instance 0 in sdk_config.h:
+```c
+#define TWI_ENABLED 1
+#define TWI0_ENABLED 1
+#define TWI0_USE_EASY_DMA 1
+```
+In top of main, include required header files and define symbols that will be used later:
+```c
+#include "nrf_drv_twi.h"
+#include "nrf_delay.h"
 
-## Adding timer to light_switch_dimming_server example
+#define TWI_SENSOR_INSTANCE 0
+static const nrf_drv_twi_t     m_twi_sensors = NRF_DRV_TWI_INSTANCE(TWI_SENSOR_INSTANCE);
+
+#define VDD_PWR_CTRL    30
+#define SX1509_ADDR     0x3E
+#define LED_RED_MASK    0b01100000  // LEDs are active low, set G/B pins to high to light RED
+#define LED_GREEN_MASK  0b11000000  // LEDs are active low, set R/B pins to high to light GREEN
+#define LED_BLUE_MASK   0b10100000  // LEDs are active low, set R/G pins to high to light BLUE
+```
+In order to read/write the registers of SX1509 IO Extender, it is necessary to define the addresses of its registers (or you can download and include [this file](https://github.com/sparkfun/SparkFun_SX1509_Arduino_Library/blob/master/src/util/sx1509_registers.h)). We will use the following registers:
+```c
+#define REG_INPUT_DISABLE_A	0x01	// RegInputDisableA Input buffer disable register _ I/O[7_0] (Bank A) 0000 0000
+#define REG_PULL_UP_A		0x07	// RegPullUpA Pull_up register _ I/O[7_0] (Bank A) 0000 0000
+#define REG_PULL_DOWN_A		0x09	// RegPullDownA Pull_down register _ I/O[7_0] (Bank A) 0000 0000
+#define REG_DIR_A		0x0F	// RegDirA Direction register _ I/O[7_0] (Bank A) 1111 1111
+#define REG_DATA_A		0x11	// RegDataA Data register _ I/O[7_0] (Bank A) 1111 1111*
+```
+Define three new functions, one function to initialize the TWI driver, a helper-function to write a 1-byte register, and a initialization function for the Thingy LED:
+```c
+void twi_init(void)
+{
+    // Configure and set VDD_PWR_CTRL pin to enable supply to TWI peripherals
+    nrf_gpio_cfg_output(VDD_PWR_CTRL);
+    nrf_gpio_pin_set(VDD_PWR_CTRL);
+    nrf_delay_ms(5); // Wait for voltage to settle
+
+    ret_code_t err_code;
+
+    const nrf_drv_twi_config_t twi_config = {
+       .scl                = TWI_SCL,
+       .sda                = TWI_SDA,
+       .frequency          = NRF_DRV_TWI_FREQ_100K,
+       .interrupt_priority = APP_IRQ_PRIORITY_LOWEST,
+       .clear_bus_init     = false
+    };
+
+    err_code = nrf_drv_twi_init(&m_twi_sensors, &twi_config, NULL, NULL);
+    APP_ERROR_CHECK(err_code);
+
+    nrf_drv_twi_enable(&m_twi_sensors);
+
+}
+
+void twi_write_register (uint8_t reg_addr, uint8_t val)
+{
+    uint8_t reg[2] = {reg_addr, val};
+    ret_code_t err_code = nrf_drv_twi_tx(&m_twi_sensors, SX1509_ADDR, reg, sizeof(reg), false);
+    APP_ERROR_CHECK(err_code);
+}
+void thingy_led_init(void)
+{
+    twi_init();
+    
+    twi_write_register(REG_DIR_A, 0x00);            // Set direction for all pins on SX1509 Port A to OUTPUT
+    twi_write_register(REG_INPUT_DISABLE_A, 0xFF);  // Disconnect input for all pins on SX1509 Port A
+    twi_write_register(REG_PULL_UP_A, 0x00);        // Disable PULLUP for all pins on SX1509 Port A
+    twi_write_register(REG_PULL_DOWN_A, 0x00);      // Disable PULLDOWN for all pins on SX1509 Port A
+    twi_write_register(REG_DATA_A, LED_BLUE_MASK);  // Set Thingy LED to BLUE
+}
+```
+The twi_init() function will also set GPIO P0.30 high, to [enable the supply voltage to the sensors, IO Expander, and LEDs](https://infocenter.nordicsemi.com/topic/ug_thingy52/UG/thingy52/hw_description/power_supply.html?cp=10_0_6_9). If this pin is not set, you will get errors when trying to write registers in the IO Expander.
+
+Finally, call thingy_led_init() from initialize():
+```c
+thingy_led_init();
+```
+When compiling and running this code, the LED of Thingy:52 should light up with solid blue color. The color of the LED can be switched between red, green, and blue, by changing the second argument to the last call to twi_write_register() from LED_BLUE_MASK to LED_RED_MASK/LED_GREEN_MASK.
+
+### Challenge: Add full drivers for IO extender and LED driver
+
+The SDK for Mesh does not contain drivers for the IO extender that is used in Thingy:52 FW. There is an example available on GitHub that implements support for this in a Mesh example. With full driver integration, you can easily control the LEDs color and intensity, in addition to use blink and breathing functionality of SX1509 chip.
+
+**Hints:**
+- You can [follow the instructions in the GitHub README](https://github.com/NordicPlayground/thingy52-mesh-provisioning-demo#building-the-demo) to get the required files from Thingy-FW SDK into your Mesh SDK.
+- The [project file](https://github.com/NordicPlayground/thingy52-mesh-provisioning-demo/blob/master/thingy_provisioning_demo_generic_OnOff_BLINK/light_switch_proxy_server_nrf52832_xxAA_s132_6_0_0.emProject#L172) will give you hints to which files are required.
+- Remember to [initialize the drivers](https://github.com/NordicPlayground/thingy52-mesh-provisioning-demo/blob/master/thingy_provisioning_demo_generic_OnOff_BLINK/src/main.c#L482).
+
+## Add timer to send periodic UART string
 
 The example already includes timer driver, since this is used by PWM library (used to control LEDs). This means that we do not need to add paths to the headers, or include source files. The code in this section is based on the [peripheral timer example](https://infocenter.nordicsemi.com/topic/com.nordic.infocenter.sdk5.v15.2.0/nrf_dev_timer_example.html?cp=5_4_0_4_5_46) in nRF5 SDK v15.2.0.
 
@@ -318,7 +427,7 @@ timers_init();
 ```
 If you compile and the application, you should now see the string "Hello nrf_serial!" being printed in the terminal every 1000 ms.
 
-## Adding SAADC driver to light_switch_dimming_server example
+## Add SAADC driver for sampling of analog inputs
 
 From nRF5 SDK v15.0.0, all drivers have been moved to external nrfx driver module. This task will setup and configure sampling of analog input using nrfx version of SAADC driver. SDK 15.x.0 includes a legacy layer that allows you to use the legacy driver APIs, but this might be removed in future SDK versions. It it therefore recommended to use nrfx drivers directly for new designs, whenever possible. The code in this task is based on the SAADC peripheral example in nRF5 SDK v15.2.0, but we have replaced the legaxy API with nrfx driver API.
 
