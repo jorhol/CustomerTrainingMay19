@@ -74,6 +74,9 @@
 #include "ble_softdevice_support.h"
 
 #include "nrf_serial.h"
+#include "nrfx_saadc.h"
+#include "nrfx_ppi.h"
+#include "nrf_drv_timer.h"
 
 #ifdef BOARD_PCA20020
 
@@ -125,6 +128,15 @@ NRF_SERIAL_CONFIG_DEF(serial_config, NRF_SERIAL_MODE_IRQ,
 
 NRF_SERIAL_UART_DEF(serial_uart, 0);
 
+#define SAMPLES_IN_BUFFER 8
+static nrf_saadc_value_t     m_buffer_pool[2][SAMPLES_IN_BUFFER];
+static nrf_saadc_value_t     saadc_buffer_serial[SAMPLES_IN_BUFFER];
+static nrf_ppi_channel_t     m_ppi_channel;
+
+const nrf_drv_timer_t m_timer_id = NRF_DRV_TIMER_INSTANCE(3);
+#define TIMER_COMPARE_TIME_MS 1000
+static uint8_t send_timer_uart_string = false;
+
 #define APP_LEVEL_STEP_SIZE     (16384L)
 
 static bool m_device_provisioned;
@@ -148,7 +160,7 @@ APP_LEVEL_SERVER_DEF(m_level_server_0,
  */
 APP_PWM_INSTANCE(PWM0, 1);
 #ifdef BOARD_PCA20020
-app_pwm_config_t m_pwm0_config = APP_PWM_DEFAULT_CONFIG_1CH(200, ANA_DIG2);
+app_pwm_config_t m_pwm0_config = APP_PWM_DEFAULT_CONFIG_1CH(200, ANA_DIG1);
 #else
 app_pwm_config_t m_pwm0_config = APP_PWM_DEFAULT_CONFIG_1CH(200, BSP_LED_0);
 #endif
@@ -306,6 +318,110 @@ static void mesh_init(void)
     ERROR_CHECK(mesh_stack_init(&init_params, &m_device_provisioned));
 }
 
+
+void saadc_callback(nrfx_saadc_evt_t const * p_event)
+{
+    if (p_event->type == NRFX_SAADC_EVT_DONE)
+    {
+        ret_code_t err_code;
+
+        send_timer_uart_string = true;
+
+        memcpy(saadc_buffer_serial, p_event->data.done.p_buffer, SAMPLES_IN_BUFFER*sizeof(int16_t));
+
+        err_code = nrfx_saadc_buffer_convert(p_event->data.done.p_buffer, SAMPLES_IN_BUFFER);
+        APP_ERROR_CHECK(err_code);
+
+    }
+}
+
+
+void saadc_init(void)
+{
+    ret_code_t err_code;
+
+    nrfx_saadc_config_t saadc_config = NRFX_SAADC_DEFAULT_CONFIG;
+
+    nrf_saadc_channel_config_t channel_config =
+        NRFX_SAADC_DEFAULT_CHANNEL_CONFIG_SE(NRF_SAADC_INPUT_AIN2);
+
+    err_code = nrfx_saadc_init(&saadc_config, saadc_callback);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = nrfx_saadc_channel_init(0, &channel_config);
+    APP_ERROR_CHECK(err_code);
+
+#ifndef BOARD_PCA20020
+    nrf_saadc_channel_config_t channel_config2 =
+        NRFX_SAADC_DEFAULT_CHANNEL_CONFIG_SE(NRF_SAADC_INPUT_AIN1);
+
+    err_code = nrfx_saadc_channel_init(1, &channel_config2);
+    APP_ERROR_CHECK(err_code);
+#endif
+
+    err_code = nrfx_saadc_buffer_convert(m_buffer_pool[0], SAMPLES_IN_BUFFER);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = nrfx_saadc_buffer_convert(m_buffer_pool[1], SAMPLES_IN_BUFFER);
+    APP_ERROR_CHECK(err_code);
+
+    uint32_t timer_compare_event_addr = nrf_drv_timer_compare_event_address_get(&m_timer_id,
+                                                                                NRF_TIMER_CC_CHANNEL0);
+    uint32_t saadc_sample_task_addr   = nrfx_saadc_sample_task_get();
+
+    /* setup ppi channel so that timer compare event is triggering sample task in SAADC */
+    err_code = nrfx_ppi_channel_alloc(&m_ppi_channel);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = nrfx_ppi_channel_assign(m_ppi_channel,
+                                          timer_compare_event_addr,
+                                          saadc_sample_task_addr);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = nrfx_ppi_channel_enable(m_ppi_channel);
+
+    APP_ERROR_CHECK(err_code);
+
+}
+
+/**
+ * @brief Handler for timer events.
+ */
+void timer_event_handler(nrf_timer_event_t event_type, void* p_context)
+{
+    switch (event_type)
+    {
+        case NRF_TIMER_EVENT_COMPARE0:
+            {
+
+            }
+            break;
+
+        default:
+            //Do nothing.
+            break;
+    }
+}
+
+
+void timers_init(uint32_t time_ms)
+{
+    uint32_t time_ticks;
+    uint32_t err_code = NRF_SUCCESS;
+
+    //Configure TIMER_LED for generating simple light effect - leds on board will invert his state one after the other.
+    nrf_drv_timer_config_t timer_cfg = NRF_DRV_TIMER_DEFAULT_CONFIG;
+    err_code = nrf_drv_timer_init(&m_timer_id, &timer_cfg, timer_event_handler);
+    APP_ERROR_CHECK(err_code);
+
+    time_ticks = nrf_drv_timer_ms_to_ticks(&m_timer_id, time_ms);
+
+    nrf_drv_timer_extended_compare(
+         &m_timer_id, NRF_TIMER_CC_CHANNEL0, time_ticks, NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK, false);
+
+    nrf_drv_timer_enable(&m_timer_id);
+}
+
 #ifdef BOARD_PCA20020
 
 void twi_init(void)
@@ -372,8 +488,12 @@ static void initialize(void)
                            NRF_SERIAL_MAX_TIMEOUT);
     APP_ERROR_CHECK(ret);
 
+    timers_init(TIMER_COMPARE_TIME_MS);
+    saadc_init();
+#if 0
 #ifdef BOARD_PCA20020
     thingy_led_init();
+#endif
 #endif
 
     ble_stack_init();
@@ -424,6 +544,33 @@ int main(void)
 
     for (;;)
     {
+        if(send_timer_uart_string == true)
+        {
+            int32_t ch0_avg = 0;
+            int32_t ch1_avg = 0;
+            uint8_t loop = 0;
+
+            for(int i = 0; i < SAMPLES_IN_BUFFER; i+=2)
+            {
+                ch0_avg += saadc_buffer_serial[i];
+                ch1_avg += saadc_buffer_serial[i+1];
+                loop++;
+            }
+
+            ch0_avg /= loop;
+            ch1_avg /= loop;
+
+            static char tx_message[40];
+            sprintf(tx_message, "SAADC buffer full! Ch0 avg: %d Ch1 avg: %d\n\r", ch0_avg,  ch1_avg);
+
+            ret_code_t ret = nrf_serial_write(&serial_uart,
+                                   tx_message,
+                                   strlen(tx_message),
+                                   NULL,
+                                   NRF_SERIAL_MAX_TIMEOUT);
+            APP_ERROR_CHECK(ret);
+            send_timer_uart_string = false;
+        }
         (void)sd_app_evt_wait();
     }
 }
