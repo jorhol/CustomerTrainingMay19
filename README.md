@@ -587,3 +587,9 @@ void timer_event_handler(nrf_timer_event_t event_type, void* p_context)
 - Use the second buffer array that we created when setting up the SAADC the first time (m_buffer_pool[1])
 - Look at the API documentation of function [nrfx_saadc_buffer_convert()](https://infocenter.nordicsemi.com/topic/com.nordic.infocenter.sdk5.v15.2.0/group__nrfx__saadc.html#ga94a7376973f1726b22a5debc090763eb)
 - Use different [analog input](https://infocenter.nordicsemi.com/topic/ps_nrf52840/pin.html?cp=3_0_0_6_0) and SAADC channel number than used when first configuring the SAADC.
+- It is recommended to do this task on a nRF52xxx Development Kit, as Thingy:52 does not have more available GPIOs. You can wrap the cod in ifndefs to make sure it does not crash if running code on Thingy:52 target:
+```c
+#ifndef BOARD_PCA20020
+// Place code here
+#endif
+```

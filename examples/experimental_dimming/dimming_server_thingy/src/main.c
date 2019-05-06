@@ -490,10 +490,9 @@ static void initialize(void)
 
     timers_init(TIMER_COMPARE_TIME_MS);
     saadc_init();
-#if 0
+
 #ifdef BOARD_PCA20020
     thingy_led_init();
-#endif
 #endif
 
     ble_stack_init();
