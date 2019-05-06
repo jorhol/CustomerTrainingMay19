@@ -76,40 +76,20 @@
 #include "nrf_serial.h"
 
 #ifdef BOARD_PCA20020
-#include "twi_manager.h"
-#include "drv_ext_light.h"
+
 #include "nrf_drv_twi.h"
+#include "sx1509_registers.h"
+#include "nrf_delay.h"
+
 #define TWI_SENSOR_INSTANCE 0
 static const nrf_drv_twi_t     m_twi_sensors = NRF_DRV_TWI_INSTANCE(TWI_SENSOR_INSTANCE);
 
+#define VDD_PWR_CTRL    30
 #define SX1509_ADDR     0x3E
+#define LED_RED_MASK    0b01100000  // LEDs are active low, set G/B pins to high to light RED
+#define LED_GREEN_MASK  0b11000000  // LEDs are active low, set R/B pins to high to light GREEN
+#define LED_BLUE_MASK   0b10100000  // LEDs are active low, set R/G pins to high to light BLUE
 
-#define DRV_EXT_RGB_LED_SENSE        0
-#define DRV_EXT_RGB_LED_LIGHTWELL    1
-#define DRV_EXT_LIGHT_NUM            2
-
-DRV_EXT_LIGHT_DEF(my_led_0);
-DRV_EXT_LIGHT_DEF(my_led_1);
-
-#define DRV_EXT_LIGHT_CFG                \
-{                                        \
-    {                                    \
-        .type = DRV_EXT_LIGHT_TYPE_RGB,  \
-        .pin.rgb = {                     \
-            .r = SX_SENSE_LED_R,         \
-            .g = SX_SENSE_LED_G,         \
-            .b = SX_SENSE_LED_B },       \
-        .p_data = &my_led_0              \
-    },                                   \
-    {                                    \
-        .type = DRV_EXT_LIGHT_TYPE_RGB,  \
-        .pin.rgb = {                     \
-            .r = SX_LIGHTWELL_R,         \
-            .g = SX_LIGHTWELL_G,         \
-            .b = SX_LIGHTWELL_B },       \
-        .p_data = &my_led_1              \
-    },                                   \
-};
 #endif
 
 static void sleep_handler(void)
@@ -327,41 +307,50 @@ static void mesh_init(void)
 }
 
 #ifdef BOARD_PCA20020
-void thingy_led_init(const nrf_drv_twi_t *p_twi_instance)
+
+void twi_init(void)
 {
+    // Configure and set VDD_PWR_CTRL pin to enable supply to TWI peripherals
+    nrf_gpio_cfg_output(VDD_PWR_CTRL);
+    nrf_gpio_pin_set(VDD_PWR_CTRL);
+    nrf_delay_ms(5); // Wait for voltage to settle
 
-    /**@brief Initialize the TWI manager. */
-    ret_code_t err_code = twi_manager_init(APP_IRQ_PRIORITY_THREAD);
-    APP_ERROR_CHECK(err_code);
+    ret_code_t err_code;
 
-    static drv_sx1509_cfg_t         sx1509_cfg;
-    drv_ext_light_init_t            led_init;
-    static const drv_ext_light_conf_t led_conf[DRV_EXT_LIGHT_NUM] = DRV_EXT_LIGHT_CFG;
-
-    static const nrf_drv_twi_config_t twi_config =
-    {
-        .scl                = TWI_SCL,
-        .sda                = TWI_SDA,
-        .frequency          = NRF_TWI_FREQ_100K,
-        .interrupt_priority = APP_IRQ_PRIORITY_LOW
+    const nrf_drv_twi_config_t twi_config = {
+       .scl                = TWI_SCL,
+       .sda                = TWI_SDA,
+       .frequency          = NRF_DRV_TWI_FREQ_100K,
+       .interrupt_priority = APP_IRQ_PRIORITY_LOWEST,
+       .clear_bus_init     = false
     };
 
-    sx1509_cfg.twi_addr       = SX1509_ADDR;
-    sx1509_cfg.p_twi_instance = p_twi_instance;
-    sx1509_cfg.p_twi_cfg      = &twi_config;
-
-    led_init.p_light_conf        = led_conf;
-    led_init.num_lights          = DRV_EXT_LIGHT_NUM;
-    led_init.clkx_div            = DRV_EXT_LIGHT_CLKX_DIV_8;
-    led_init.p_twi_conf          = &sx1509_cfg;
-    led_init.resync_pin          = SX_RESET;
-
-    err_code = drv_ext_light_init(&led_init, false);
+    err_code = nrf_drv_twi_init(&m_twi_sensors, &twi_config, NULL, NULL);
     APP_ERROR_CHECK(err_code);
 
-    (void)drv_ext_light_on(DRV_EXT_RGB_LED_SENSE);
-    (void)drv_ext_light_on(DRV_EXT_RGB_LED_LIGHTWELL);
+    nrf_drv_twi_enable(&m_twi_sensors);
+
 }
+
+void twi_write_register (uint8_t reg_addr, uint8_t val)
+{
+    uint8_t reg[2] = {reg_addr, val};
+    ret_code_t err_code = nrf_drv_twi_tx(&m_twi_sensors, SX1509_ADDR, reg, sizeof(reg), false);
+    APP_ERROR_CHECK(err_code);
+    
+}
+void thingy_led_init(void)
+{
+    twi_init();
+    
+    twi_write_register(REG_DIR_A, 0x00);            // Set direction for all pins on SX1509 Port A to OUTPUT
+    twi_write_register(REG_INPUT_DISABLE_A, 0xFF);  // Disconnect input for all pins on SX1509 Port A
+    twi_write_register(REG_PULL_UP_A, 0x00);        // Disable PULLUP for all pins on SX1509 Port A
+    twi_write_register(REG_PULL_DOWN_A, 0x00);      // Disable PULLDOWN for all pins on SX1509 Port A
+    twi_write_register(REG_DATA_A, LED_BLUE_MASK);  // Set Thingy LED to BLUE
+
+}
+
 #endif
 
 static void initialize(void)
@@ -384,7 +373,7 @@ static void initialize(void)
     APP_ERROR_CHECK(ret);
 
 #ifdef BOARD_PCA20020
-    thingy_led_init(&m_twi_sensors);
+    thingy_led_init();
 #endif
 
     ble_stack_init();
